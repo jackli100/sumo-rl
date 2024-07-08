@@ -24,28 +24,122 @@ import traci
 from sumo_rl import SumoEnvironment
 import statistics
 
-class TrafficMatrix:
-    """
-    Represents a traffic matrix for a simulation.
-    """
+import os
+import optuna
+from optuna.logging import set_verbosity, DEBUG
+from stable_baselines3 import DQN
+from stable_baselines3.common.vec_env import DummyVecEnv
+from stable_baselines3.common.evaluation import evaluate_policy
+from joblib import Parallel, delayed
+from sumo_rl import SumoEnvironment  # Import your SumoEnvironment
+import json
+import re
+import shutil
 
-    def __init__(self, output_folder, proportion_of_saturations=[0.75, 0.75, 0.75, 0.75]):
-        '''
-        Initializes a TrafficMatrix object.
+class Train:
+    def __init__(self, 
+                 net_file, 
+                 saturation_proportions=[0.75, 0.75, 0.75, 0.75],
+                 total_timesteps=10000, 
+                 trained_model=None, 
+                 num_of_episodes=10, 
+                 n_eval_episodes=5,
+                 seed=10, 
+                 fix_seed=False, 
+                 fix_ts=False,
+                 learning_rate=0.0001, 
+                 learning_starts=0, 
+                 train_freq=1, 
+                 target_update_interval=2000, 
+                 exploration_initial_eps=0.05, 
+                 exploration_final_eps=0.01, 
+                 training_fraction=1, 
+                 verbose=1, 
+                 tripinfo=False, 
+                 emissioninfo=False, 
+                 buffer_size=200000, 
+                 batch_size=256, 
+                 gamma=0.99):
+        
+        self.tripinfo = tripinfo
+        self.emissioninfo = emissioninfo
+        self.net_file = net_file
+        self.output_folder = "outputs"
 
-        Args:
-            output_folder (str): The output folder path. use function to generate
-            proportion_of_saturations (list): The proportion of saturations for each direction of traffic flow, the sequence is [N, S, W, E].        
-        '''
-        self.prop = proportion_of_saturations
+        # 提取net_file
+        net_file_basename = os.path.basename(net_file)
+        net_numbers = re.findall(r'\d+', net_file_basename)
+        # 构建net_info
+        net_info_suffix = "_fixed" if fix_ts else ""
+        self.net_info = "_".join(net_numbers) + net_info_suffix
+        # 构建flow_info
+        self.flow_info = "-".join([str(p) for p in saturation_proportions])
+        # 构建output_folder
+        self.output_folder = self.generate_result_folder()
+
+        # 构建route_file
+        self.prop = saturation_proportions
         self.capacity_straight = 2080
         self.capacity_left = 1411
         self.capacity_right = 1411
         self.green_time_proportion = (30 - 4) / 120
         self.convert_to_seconds = 1 / 3600
         self.volumes = self._generate_volumes()
-        self.output_folder = output_folder
-        self.output_file = os.path.join(output_folder, "output.rou.xml")
+        self.route_file = os.path.join(self.output_folder, "output.rou.xml")
+        self.create_xml()
+
+        self.csv_name = "dqn"
+        self.tripinfo_name = "tripinfos.xml"
+        self.out_csv_name = os.path.join(self.output_folder, self.csv_name)
+        self.tripinfo_output_name = os.path.join(self.output_folder, self.tripinfo_name)
+        self.tripinfo_cmd = f"--tripinfo {self.tripinfo_output_name}"
+        self.total_timesteps = total_timesteps
+        self.model_save_path = os.path.join(self.output_folder, "model.zip")
+        self.num_of_episodes = num_of_episodes
+        self.n_eval_episodes = n_eval_episodes
+        self.seed = seed
+        self.fix_seed = fix_seed
+        self.fix_ts = fix_ts
+        
+        # initialize the environment
+        self.env = SumoEnvironment(
+            net_file=self.net_file,
+            route_file=self.route_file,
+            out_csv_name=self.out_csv_name,
+            single_agent=True,
+            use_gui=False,
+            num_seconds=int(self.total_timesteps / self.num_of_episodes),
+            sumo_seed=self.seed,
+            fixed_seed=self.fix_seed,
+            fixed_ts=self.fix_ts,
+            tripinfo=self.tripinfo,
+            emissioninfo=self.emissioninfo,
+            output_folder=self.output_folder
+        )
+        self.trained_model = trained_model
+        self.learning_rate = learning_rate
+        self.learning_starts = learning_starts
+        self.train_freq = train_freq
+        self.target_update_interval = target_update_interval
+        self.exploration_initial_eps = exploration_initial_eps
+        self.exploration_final_eps = exploration_final_eps
+        self.training_fraction = training_fraction
+        self.buffer_size = buffer_size
+        self.batch_size = batch_size
+        self.gamma = gamma
+        self.verbose = verbose
+
+    def generate_result_folder(self):
+        folfer_name = f"{self.net_info}_{self.flow_info}"
+        base_dir = "autodl-tmp\\outputs"
+        result_folder = os.path.join(base_dir, folfer_name)
+
+        if os.path.exists(result_folder):
+            shutil.rmtree(result_folder)
+
+        os.makedirs(result_folder)
+        return result_folder
+
 
     def _generate_volumes(self):
         '''
@@ -101,114 +195,8 @@ class TrafficMatrix:
         pretty_string = reparsed.toprettyxml(indent="  ")
 
         # 将格式化后的XML写入文件
-        with open(self.output_file, "w", encoding="utf-8") as f:
-            f.write(pretty_string)    
-
-    def get_traffic_string(self):
-        '''
-        Returns the traffic volumes in the form of a string formatted as d-d-d-d.
-
-        Returns:
-            str: The traffic volumes formatted as d-d-d-d.
-        '''
-        n_proportion, s_proportion, w_proportion, e_proportion = self.prop
-        traffic_string = f"{n_proportion}-{s_proportion}-{w_proportion}-{e_proportion}"
-        return traffic_string
-
-
-
-
-import os
-import optuna
-from optuna.logging import set_verbosity, DEBUG
-from stable_baselines3 import DQN
-from stable_baselines3.common.vec_env import DummyVecEnv
-from stable_baselines3.common.evaluation import evaluate_policy
-from joblib import Parallel, delayed
-from sumo_rl import SumoEnvironment  # Import your SumoEnvironment
-import json
-import re
-
-class Train:
-    def __init__(self, 
-                 output_folder, 
-                 net_file, 
-                 route_file, 
-                 total_timesteps=10000, 
-                 trained_model=None, 
-                 num_of_episodes=10, 
-                 n_eval_episodes=2,
-                 seed=10, 
-                 fix_seed=False, 
-                 fix_ts=False,
-                 learning_rate=0.0001, 
-                 learning_starts=0, 
-                 train_freq=1, 
-                 target_update_interval=2000, 
-                 exploration_initial_eps=0.05, 
-                 exploration_final_eps=0.01, 
-                 training_fraction=1, 
-                 verbose=1, 
-                 tripinfo=False, 
-                 emissioninfo=False, 
-                 buffer_size=200000, 
-                 batch_size=256, 
-                 gamma=0.99):
-        self.output_folder = output_folder
-        self.tripinfo = tripinfo
-        self.emissioninfo = emissioninfo
-        self.net_file = net_file
-
-        # 提取 net_file 文件名中的数字
-        net_file_basename = os.path.basename(net_file)
-        net_numbers = re.findall(r'\d+', net_file_basename)
-        # 构建新的属性 net_info
-        net_info_suffix = "_fixed" if fix_ts else ""
-        self.net_info = "_".join(net_numbers) + net_info_suffix
-
-        self.route_file = route_file
-        self.csv_name = "dqn"
-        self.output_folder = output_folder
-        self.tripinfo_name = "tripinfos.xml"
-        self.out_csv_name = os.path.join(output_folder, self.csv_name)
-        self.tripinfo_output_name = os.path.join(output_folder, self.tripinfo_name)
-        self.tripinfo_cmd = f"--tripinfo {self.tripinfo_output_name}"
-        self.total_timesteps = total_timesteps
-        self.model_save_path = os.path.join(output_folder, "model.zip")
-        self.num_of_episodes = num_of_episodes
-        self.n_eval_episodes = n_eval_episodes
-        self.seed = seed
-        self.fix_seed = fix_seed
-        self.fix_ts = fix_ts
-        
-        # initialize the environment
-        self.env = SumoEnvironment(
-            net_file=self.net_file,
-            route_file=self.route_file,
-            out_csv_name=self.out_csv_name,
-            single_agent=True,
-            use_gui=False,
-            num_seconds=int(self.total_timesteps / self.num_of_episodes),
-            sumo_seed=self.seed,
-            fixed_seed=self.fix_seed,
-            fixed_ts=self.fix_ts,
-            tripinfo=self.tripinfo,
-            emissioninfo=self.emissioninfo,
-            output_folder=self.output_folder
-        )
-        self.trained_model = trained_model
-        self.learning_rate = learning_rate
-        self.learning_starts = learning_starts
-        self.train_freq = train_freq
-        self.target_update_interval = target_update_interval
-        self.exploration_initial_eps = exploration_initial_eps
-        self.exploration_final_eps = exploration_final_eps
-        self.training_fraction = training_fraction
-        self.buffer_size = buffer_size
-        self.batch_size = batch_size
-        self.gamma = gamma
-        self.verbose = verbose
-
+        with open(self.route_file, "w", encoding="utf-8") as f:
+            f.write(pretty_string)
 
     def train(self):
         """
@@ -256,6 +244,7 @@ class Train:
         set_verbosity(DEBUG)
         
         def objective(trial):
+            
             env = SumoEnvironment(
                 net_file=self.net_file,
                 route_file=self.route_file,
@@ -298,6 +287,7 @@ class Train:
             )
             
             model.learn(total_timesteps=self.total_timesteps)
+
             # 在训练过程中记录反馈结果
             rewards = []
             obs = env.reset()
@@ -314,7 +304,6 @@ class Train:
             # 计算总奖励和平均奖励
             total_reward = sum(rewards)
             mean_reward = total_reward / len(rewards) if rewards else 0.0
-            
             
             # Record the trial results
             trial_results = {
@@ -354,6 +343,30 @@ class Train:
         with open(os.path.join(self.output_folder, f"hyperparameters_{os.path.basename(self.net_file)}.json"), "w") as f:
             json.dump(best_params, f, indent=4)
 
+                
+
+            # Create Optuna study and set serial optimization
+            study = optuna.create_study(direction='maximize')
+            study.optimize(objective, n_trials=n_trials)
+            
+            print(f"Best hyperparameters: {study.best_params}")
+
+            # Update class attributes with the best hyperparameters found
+            best_params = study.best_params
+            self.learning_rate = best_params['learning_rate']
+            self.learning_starts = best_params['learning_starts']
+            self.train_freq = best_params['train_freq']
+            self.target_update_interval = best_params['target_update_interval']
+            self.exploration_initial_eps = best_params['exploration_initial_eps']
+            self.exploration_final_eps = best_params['exploration_final_eps']
+            self.training_fraction = best_params['exploration_fraction']
+            self.buffer_size = best_params['buffer_size']
+            self.batch_size = best_params['batch_size']
+
+            # write those hyperparameters to a file, name contains the net file name
+            with open(os.path.join(self.output_folder, f"hyperparameters_{os.path.basename(self.net_file)}.json"), "w") as f:
+                json.dump(best_params, f, indent=4)
+
 
 
 import os
@@ -365,17 +378,20 @@ import statistics
 class ShowResults:
     def __init__(self, result_folder):
         self.result_folder = result_folder
-        self.metrics = ['system_total_stopped', 'system_total_waiting_time', 'system_mean_waiting_time']
+        self.metrics = ['system_total_stopped', 'agents_total_accumulated_waiting_time', 'system_mean_waiting_time']
         self.csv_prefix = 'dqn_conn0'
         self.tripinfo_prefix = 'tripinfos'
         self.csv_file_paths = [os.path.join(result_folder, f) for f in os.listdir(result_folder) if f.startswith(self.csv_prefix) and f.endswith('.csv')]
         self.tripinfo_file_paths = [os.path.join(result_folder, f) for f in os.listdir(result_folder) \
                                     if f.startswith(self.tripinfo_prefix) and f.endswith('.xml')]
-        
-    def read_and_concatenate_files(self):
+        self.combined_df = self.concatenate_csv_files()
+        self.combined_csv_path = os.path.join(self.result_folder, "combined.csv")
+        self.combined_df.to_csv(self.combined_csv_path, index=False)
+            
+    def concatenate_csv_files(self):
 
         dfs = []
-        for file_path in file_paths:
+        for file_path in self.csv_file_paths:
             if os.path.exists(file_path):
                 dfs.append(pd.read_csv(file_path))
             else:
@@ -388,6 +404,46 @@ class ShowResults:
         # Concatenate all dataframes
         combined_df = pd.concat(dfs, ignore_index=True)
         return combined_df
+
+    def drawing_from_csv(self):
+        # Load combined CSV file
+        df = pd.read_csv(self.combined_csv_path)
+
+        # Plot accumulated waiting time over time
+        plt.figure()
+        plt.plot(df['step'], df['agents_total_accumulated_waiting_time'], label='Accumulated Waiting Time')
+        plt.xlabel('Time Step')
+        plt.ylabel('Accumulated Waiting Time')
+        plt.title('Accumulated Waiting Time over Time')
+        plt.legend()
+        plt.grid(True)
+        accumulated_waiting_time_path = os.path.join(self.result_folder, 'accumulated_waiting_time.png')
+        plt.savefig(accumulated_waiting_time_path)
+        plt.close()
+
+        # Plot total stopped vehicles over time
+        plt.figure()
+        plt.plot(df['step'], df['system_total_stopped'], label='Total Stopped Vehicles', color='orange')
+        plt.xlabel('Time Step')
+        plt.ylabel('Total Stopped Vehicles')
+        plt.title('Total Stopped Vehicles over Time')
+        plt.legend()
+        plt.grid(True)
+        total_stopped_path = os.path.join(self.result_folder, 'total_stopped_vehicles.png')
+        plt.savefig(total_stopped_path)
+        plt.close()
+
+        # Plot mean waiting time over time
+        plt.figure()
+        plt.plot(df['step'], df['system_mean_waiting_time'], label='Mean Waiting Time', color='green')
+        plt.xlabel('Time Step')
+        plt.ylabel('Mean Waiting Time')
+        plt.title('Mean Waiting Time over Time')
+        plt.legend()
+        plt.grid(True)
+        mean_waiting_time_path = os.path.join(self.result_folder, 'mean_waiting_time.png')
+        plt.savefig(mean_waiting_time_path)
+        plt.close()
 
     def save_plot(self, steps, values, filename, ylabel, title):
         plt.figure()
@@ -444,28 +500,13 @@ class ShowResults:
                 avg_value = df[self.metrics[1]].mean()
                 episode_averages.append((i, avg_value))
                 log_file.write(f'Average {self.metrics[1]} for episode {i}: {avg_value:.3f}\n')
-            
-
+    
 # Example of usage
 # processor = ShowResults(result_folder="path/to/results", log_file_path="path/to/log.txt")
 # processor.main()
 
 
 # 假设 TrafficMatrix, Train, 和 ShowResults 类已经定义好了
-
-import shutil
-
-def generate_result_folder(info1, info2):
-    folder_name = info1 + "_" + info2
-    base_dir = "autodl-tmp\\outputs"
-    result_folder = os.path.join(base_dir, folder_name)
-    
-    if os.path.exists(result_folder):
-        shutil.rmtree(result_folder)  # 删除已有的文件夹及其内容
-    
-    os.makedirs(result_folder)
-    
-    return result_folder
 
 import subprocess
 

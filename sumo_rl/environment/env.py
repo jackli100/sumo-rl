@@ -461,7 +461,6 @@ class SumoEnvironment(gym.Env):
             "system_total_waiting_time": system_total_waiting_time,
             "system_mean_waiting_time": 0.0 if len(vehicles) == 0 else np.mean(waiting_times),
             "system_mean_speed": 0.0 if len(vehicles) == 0 else np.mean(speeds),
-            "waiting_times": waiting_times,
             "system_waiting_time_variance": 0.0 if len(waiting_times) == 0 else np.var(waiting_times),
         }
         # 调试输出系统累计等待时间
