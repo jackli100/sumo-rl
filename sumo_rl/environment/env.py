@@ -3,6 +3,7 @@ import os
 import sys
 from pathlib import Path
 from typing import Callable, Optional, Tuple, Union
+from datetime import datetime
 
 
 if "SUMO_HOME" in os.environ:
@@ -90,7 +91,7 @@ class SumoEnvironment(gym.Env):
         max_depart_delay: int = -1,
         waiting_time_memory: int = 1000,
         time_to_teleport: int = -1,
-        delta_time: int = 5,
+        delta_time: int = 1,
         yellow_time: int = 2,
         min_green: int = 5,
         max_green: int = 50,
@@ -104,6 +105,10 @@ class SumoEnvironment(gym.Env):
         sumo_warnings: bool = True,
         additional_sumo_cmd: Optional[str] = None,
         render_mode: Optional[str] = None,
+        fixed_seed: bool = False,
+        tripinfo:bool = False,
+        emissioninfo:bool = False,
+        output_folder:str = None,
     ) -> None:
         """Initialize the environment."""
         assert render_mode is None or render_mode in self.metadata["render_modes"], "Invalid render mode."
@@ -119,7 +124,7 @@ class SumoEnvironment(gym.Env):
         else:
             self._sumo_binary = sumolib.checkBinary("sumo")
 
-        assert delta_time > yellow_time, "Time between actions must be at least greater than yellow time."
+        # assert delta_time > yellow_time, "Time between actions must be at least greater than yellow time."
 
         self.begin_time = begin_time
         self.sim_max_time = begin_time + num_seconds
@@ -141,6 +146,11 @@ class SumoEnvironment(gym.Env):
         self.label = str(SumoEnvironment.CONNECTION_LABEL)
         SumoEnvironment.CONNECTION_LABEL += 1
         self.sumo = None
+        self.fix_seed = fixed_seed
+        self.tripinfo = tripinfo
+        self.emissioninfo = emissioninfo
+        self.output_folder = output_folder
+        
 
         if LIBSUMO:
             traci.start([sumolib.checkBinary("sumo"), "-n", self._net])  # Start only to retrieve traffic light information
@@ -212,9 +222,23 @@ class SumoEnvironment(gym.Env):
         if self.sumo_seed == "random":
             sumo_cmd.append("--random")
         else:
-            sumo_cmd.extend(["--seed", str(self.sumo_seed)])
+            if self.fix_seed:
+                sumo_cmd.extend(["--seed", str(int(self.sumo_seed))])
+                print(f"seed: {int(self.sumo_seed)}")
+            else:
+                # 假如不是固定seed，那么每次的seed都会加上episode，而不是取随机值
+                sumo_cmd.extend(["--seed", str(int(self.sumo_seed)+int(self.episode))])
+                print(f"seed: {int(self.sumo_seed)+int(self.episode)}")
+
         if not self.sumo_warnings:
             sumo_cmd.append("--no-warnings")
+        if self.emissioninfo:
+            sumo_cmd.extend(["--device.emissions.probability", "1.0"])  
+        if self.tripinfo:
+            tripinfo_path = os.path.join(self.output_folder, f"tripinfos-{self.episode}.xml")
+            sumo_cmd.extend(["--tripinfo-output", tripinfo_path])  # 保持原有的正确格式
+
+        
         if self.additional_sumo_cmd is not None:
             sumo_cmd.extend(self.additional_sumo_cmd.split())
         if self.use_gui or self.render_mode is not None:
@@ -242,16 +266,26 @@ class SumoEnvironment(gym.Env):
 
     def reset(self, seed: Optional[int] = None, **kwargs):
         """Reset the environment."""
+
         super().reset(seed=seed, **kwargs)
 
         if self.episode != 0:
             self.close()
             self.save_csv(self.out_csv_name, self.episode)
+            
         self.episode += 1
         self.metrics = []
 
         if seed is not None:
-            self.sumo_seed = seed
+            self.sumo_seed = seed + 1
+            with open(r"D:\trg1vr\sumo-rl-main\sumo-rl-main\seed.txt", "w") as f:
+                f.write(str(seed))
+        # 添加时间戳，以应对episode与timestep不一致的问题
+        if self.additional_sumo_cmd is not None:
+            parts = self.additional_sumo_cmd.split(".xml")
+            timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+            self.additional_sumo_cmd = f"{parts[0]}_{timestamp}.xml"
+
         self._start_simulation()
 
         if isinstance(self.reward_fn, dict):
@@ -303,6 +337,7 @@ class SumoEnvironment(gym.Env):
         Args:
             action (Union[dict, int]): action(s) to be applied to the environment.
             If single_agent is True, action is an int, otherwise it expects a dict with keys corresponding to traffic signal ids.
+
         """
         # No action, follow fixed TL defined in self.phases
         if self.fixed_ts or action is None or action == {}:
@@ -325,6 +360,9 @@ class SumoEnvironment(gym.Env):
             return observations, rewards, dones, info
 
     def _run_steps(self):
+        '''
+        直到time_to_act为True 才会停止模拟到下一个时间步
+        '''
         time_to_act = False
         while not time_to_act:
             self._sumo_step()
@@ -417,13 +455,19 @@ class SumoEnvironment(gym.Env):
         vehicles = self.sumo.vehicle.getIDList()
         speeds = [self.sumo.vehicle.getSpeed(vehicle) for vehicle in vehicles]
         waiting_times = [self.sumo.vehicle.getWaitingTime(vehicle) for vehicle in vehicles]
-        return {
-            # In SUMO, a vehicle is considered halting if its speed is below 0.1 m/s
+        system_total_waiting_time = sum(waiting_times)
+        system_info = {
             "system_total_stopped": sum(int(speed < 0.1) for speed in speeds),
-            "system_total_waiting_time": sum(waiting_times),
+            "system_total_waiting_time": system_total_waiting_time,
             "system_mean_waiting_time": 0.0 if len(vehicles) == 0 else np.mean(waiting_times),
             "system_mean_speed": 0.0 if len(vehicles) == 0 else np.mean(speeds),
+            "waiting_times": waiting_times,
+            "system_waiting_time_variance": 0.0 if len(waiting_times) == 0 else np.var(waiting_times),
         }
+        # 调试输出系统累计等待时间
+        with open('debug_system_info.txt', 'a') as f:
+            f.write(f"System Total Waiting Time: {system_total_waiting_time}\n")
+        return system_info
 
     def _get_per_agent_info(self):
         stopped = [self.traffic_signals[ts].get_total_queued() for ts in self.ts_ids]
@@ -436,9 +480,14 @@ class SumoEnvironment(gym.Env):
             info[f"{ts}_stopped"] = stopped[i]
             info[f"{ts}_accumulated_waiting_time"] = accumulated_waiting_time[i]
             info[f"{ts}_average_speed"] = average_speed[i]
+        agents_total_accumulated_waiting_time = sum(accumulated_waiting_time)
         info["agents_total_stopped"] = sum(stopped)
-        info["agents_total_accumulated_waiting_time"] = sum(accumulated_waiting_time)
+        info["agents_total_accumulated_waiting_time"] = agents_total_accumulated_waiting_time
+        # 调试输出代理累计等待时间
+        with open('debug_agent_info.txt', 'a') as f:
+            f.write(f"Agents Total Accumulated Waiting Time: {agents_total_accumulated_waiting_time}\n")
         return info
+
 
     def close(self):
         """Close the environment and stop the SUMO simulation."""
@@ -452,7 +501,6 @@ class SumoEnvironment(gym.Env):
         if self.disp is not None:
             self.disp.stop()
             self.disp = None
-
         self.sumo = None
 
     def __del__(self):
@@ -517,7 +565,6 @@ class SumoEnvironmentPZ(AECEnv, EzPickle):
 
         self.seed()
         self.env = SumoEnvironment(**self._kwargs)
-        self.render_mode = self.env.render_mode
 
         self.agents = self.env.ts_ids
         self.possible_agents = self.env.ts_ids
@@ -539,6 +586,7 @@ class SumoEnvironmentPZ(AECEnv, EzPickle):
 
     def reset(self, seed: Optional[int] = None, options: Optional[dict] = None):
         """Reset the environment."""
+
         self.env.reset(seed=seed, options=options)
         self.agents = self.possible_agents[:]
         self.agent_selection = self._agent_selector.reset()

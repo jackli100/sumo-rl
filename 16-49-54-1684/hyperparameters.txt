@@ -1,0 +1,24 @@
+total_timesteps: 8000
+model_save_path: /root/autodl-tmp/outputs/2024-07-07/16-49-54-1684/model.zip
+num_of_episodes: 8
+seed: 24
+net_file: sumo_rl/nets/2way-single-intersection/single-intersection-4.net.xml
+route_file: /root/autodl-tmp/outputs/2024-07-07/16-49-54-1684/output.rou.xml
+out_csv_name: /root/autodl-tmp/outputs/2024-07-07/16-49-54-1684/dqn
+fixed_seed: False
+fixed_ts: False
+tripinfo_output_name: /root/autodl-tmp/outputs/2024-07-07/16-49-54-1684/tripinfos.xml
+tripinfo: True
+tripinfo_cmd: --tripinfo /root/autodl-tmp/outputs/2024-07-07/16-49-54-1684/tripinfos.xml
+trained_model: None
+learning_rate: 0.0001
+learning_starts: 0
+train_freq: 1
+target_update_interval: 2000
+exploration_initial_eps: 0.05
+exploration_final_eps: 0.01
+training_fraction: 1.0
+verbose: 1
+discount_factor: None
+batch_size: 256
+replay_buffer_size: 200000

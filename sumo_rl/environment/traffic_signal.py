@@ -12,7 +12,22 @@ else:
 import numpy as np
 from gymnasium import spaces
 
-
+class Timer:
+    def __init__(self):
+        self.time_elapsed = 0
+    
+    def start(self):
+        self.time_elapsed = 0
+    
+    def reset(self, reset_value=0):
+        self.time_elapsed = reset_value
+    
+    def update(self):
+        self.time_elapsed += 1
+    
+    def elapsed_time(self):
+        return self.time_elapsed
+    
 class TrafficSignal:
     """This class represents a Traffic Signal controlling an intersection.
 
@@ -72,17 +87,25 @@ class TrafficSignal:
         self.id = ts_id
         self.env = env
         self.delta_time = delta_time
-        self.yellow_time = yellow_time
+        self.yellow_time_1 = yellow_time
+        self.yellow_time_2 = yellow_time
+        # self.red_time = 1
         self.min_green = min_green
         self.max_green = max_green
         self.green_phase = 0
-        self.is_yellow = False
+        self.green_phase_state = 'rrrrrrrrrrrr' # 如果确认要换相位，就把这个值改成新相位的状态
+        self.new_phase_state = 'rrrrrrrrrrrr' # 先放进去这个值，不一定要换
+        self.timers = [Timer() for _ in range(12)]
+        self.is_yellow_1 = False
+        self.is_yellow_2 = False
+        # self.is_red = False
         self.time_since_last_phase_change = 0
         self.next_action_time = begin_time
         self.last_measure = 0.0
         self.last_reward = None
         self.reward_fn = reward_fn
         self.sumo = sumo
+        self.old_green_phase = 0
 
         if type(self.reward_fn) is str:
             if self.reward_fn in TrafficSignal.reward_fns.keys():
@@ -104,6 +127,8 @@ class TrafficSignal:
         self.observation_space = self.observation_fn.observation_space()
         self.action_space = spaces.Discrete(self.num_green_phases)
 
+    # D:\trg1vr\sumo-rl-main\sumo-rl-main\sumo_rl\environment\env.py
+
     def _build_phases(self):
         phases = self.sumo.trafficlight.getAllProgramLogics(self.id)[0].phases
         if self.env.fixed_ts:
@@ -112,25 +137,43 @@ class TrafficSignal:
 
         self.green_phases = []
         self.yellow_dict = {}
+        self.red_dict = {}
+
         for phase in phases:
             state = phase.state
             if "y" not in state and (state.count("r") + state.count("s") != len(state)):
                 self.green_phases.append(self.sumo.trafficlight.Phase(60, state))
+
         self.num_green_phases = len(self.green_phases)
         self.all_phases = self.green_phases.copy()
+        self.green_phase_state = self.all_phases[0].state
 
         for i, p1 in enumerate(self.green_phases):
             for j, p2 in enumerate(self.green_phases):
                 if i == j:
                     continue
-                yellow_state = ""
+                yellow_state_1 = ""
+                yellow_state_2 = ""
+                red_state = ""
                 for s in range(len(p1.state)):
                     if (p1.state[s] == "G" or p1.state[s] == "g") and (p2.state[s] == "r" or p2.state[s] == "s"):
-                        yellow_state += "y"
+                        yellow_state_1 += "y"
+                        yellow_state_2 += "r"
+                        red_state += "r"
+                    elif (p1.state[s] == "r" or p1.state[s] == "s") and (p2.state[s] == "G" or p2.state[s] == "g"):
+                        yellow_state_1 += "r"
+                        yellow_state_2 += "u"
+                        red_state += "r"
                     else:
-                        yellow_state += p1.state[s]
-                self.yellow_dict[(i, j)] = len(self.all_phases)
-                self.all_phases.append(self.sumo.trafficlight.Phase(self.yellow_time, yellow_state))
+                        yellow_state_1 += p1.state[s]
+                        yellow_state_2 += p1.state[s]
+                        red_state += p1.state[s]
+
+                self.yellow_dict[(i, j)] = (len(self.all_phases), len(self.all_phases) \
+                                            + 1) # 储存了所有黄色相位+红色相位的索引
+                self.all_phases.append(self.sumo.trafficlight.Phase(self.yellow_time_1, yellow_state_1))
+                # self.all_phases.append(self.sumo.trafficlight.Phase(self.red_time, red_state))
+                self.all_phases.append(self.sumo.trafficlight.Phase(self.yellow_time_2, yellow_state_2))
 
         programs = self.sumo.trafficlight.getAllProgramLogics(self.id)
         logic = programs[0]
@@ -138,6 +181,7 @@ class TrafficSignal:
         logic.phases = self.all_phases
         self.sumo.trafficlight.setProgramLogic(self.id, logic)
         self.sumo.trafficlight.setRedYellowGreenState(self.id, self.all_phases[0].state)
+
 
     @property
     def time_to_act(self):
@@ -150,31 +194,74 @@ class TrafficSignal:
         If the traffic signal should act, it will set the next green phase and update the next action time.
         """
         self.time_since_last_phase_change += 1
-        if self.is_yellow and self.time_since_last_phase_change == self.yellow_time:
-            # self.sumo.trafficlight.setPhase(self.id, self.green_phase)
+        for i in range(len(self.timers)):
+            self.timers[i].update()
+        # 转换到第二个黄灯
+        if self.is_yellow_1 and self.time_since_last_phase_change == self.yellow_time_1:
+            yellow_phase_index = self.yellow_dict[self.old_green_phase, self.green_phase][1]
+            self.sumo.trafficlight.setRedYellowGreenState(self.id, self.all_phases[yellow_phase_index].state)
+            self.is_yellow_1 = False
+            self.is_yellow_2 = True
+        # 转换到下一个绿灯
+        if self.is_yellow_2 and self.time_since_last_phase_change == self.yellow_time_1 + self.yellow_time_2:
             self.sumo.trafficlight.setRedYellowGreenState(self.id, self.all_phases[self.green_phase].state)
-            self.is_yellow = False
+            self.is_yellow_2 = False
+
 
     def set_next_phase(self, new_phase: int):
-        """Sets what will be the next green phase and sets yellow phase if the next phase is different than the current.
-
-        Args:
-            new_phase (int): Number between [0 ... num_green_phases]
-        """
+        '''
+        确定要换之前：
+            new_phase 是新的相位
+            green_phase 是旧的相位
+            这对关系用于寻找对应的黄色相位和红色相位
+            
+        确定要换之后：
+            old_green_phase 是旧的相位，green_phase 是新的相位, 这对关系用于寻找对应的黄色相位和红色相位
+        '''
         new_phase = int(new_phase)
-        if self.green_phase == new_phase or self.time_since_last_phase_change < self.yellow_time + self.min_green:
-            # self.sumo.trafficlight.setPhase(self.id, self.green_phase)
+        # new_phase_state 就是一个过渡用的变量，如果确认要换相位，就把这个值改成新相位的状态
+        # 这里判断如果还不能换相位，就还是用green_phase
+        if self.green_phase == new_phase:
             self.sumo.trafficlight.setRedYellowGreenState(self.id, self.all_phases[self.green_phase].state)
             self.next_action_time = self.env.sim_step + self.delta_time
-        else:
-            # self.sumo.trafficlight.setPhase(self.id, self.yellow_dict[(self.green_phase, new_phase)])  # turns yellow
-            self.sumo.trafficlight.setRedYellowGreenState(
-                self.id, self.all_phases[self.yellow_dict[(self.green_phase, new_phase)]].state
-            )
-            self.green_phase = new_phase
+
+        elif not self.can_switch():
+            self.sumo.trafficlight.setRedYellowGreenState(self.id, self.all_phases[self.green_phase].state)
             self.next_action_time = self.env.sim_step + self.delta_time
-            self.is_yellow = True
+            
+        else: # 确认要换
+            self.new_phase_state = self.all_phases[new_phase].state       
+            yellow_phase_index = self.yellow_dict[self.green_phase, new_phase][0]
+            self.sumo.trafficlight.setRedYellowGreenState(self.id, self.all_phases[yellow_phase_index].state)
+            # 这里保存旧的相位，green_phase变成新的相位
+            self.old_green_phase = self.green_phase            
+            self.green_phase = new_phase
+            # green_phase_state 目前是旧的相位的状态，new_phase_state是新的相位的状态
+            self.update_lights()
+            # 将新的状态赋值给旧的状态，以便于下一次判断
+            self.green_phase_state = self.new_phase_state
+            self.next_action_time = self.env.sim_step + self.yellow_time_1 + self.yellow_time_2
+
+            self.is_yellow_1 = True
             self.time_since_last_phase_change = 0
+            
+
+    def can_switch(self):
+        for i in range(len(self.green_phase_state)):
+            if self.green_phase_state[i] in ('G', 'g'):
+                if self.timers[i].elapsed_time() < self.min_green:
+                    return False
+        return True
+
+    def update_lights(self):
+        '''
+        green_phase_state 是旧的相位，new_phase_state 是新的相位
+        '''
+        for i in range(len(self.green_phase_state)):
+            if self.new_phase_state[i] in ('G', 'g'):
+                if self.green_phase_state[i] not in ('G', 'g'):
+                    self.timers[i].reset(-self.yellow_time_1 - self.yellow_time_2)
+
 
     def compute_observation(self):
         """Computes the observation of the traffic signal."""
@@ -195,14 +282,36 @@ class TrafficSignal:
         return -self.get_total_queued()
 
     def _diff_waiting_time_reward(self):
+        # 计算当前累计等待时间并进行标准化
         ts_wait = sum(self.get_accumulated_waiting_time_per_lane()) / 100.0
+
+        # 计算奖励值
         reward = self.last_measure - ts_wait
+
+        # 更新 last_measure
         self.last_measure = ts_wait
+
+        # 打开文件以追加模式写入
+        with open('reward_debug.txt', 'a') as f:
+            # 记录当前累计等待时间
+            f.write(f"Current accumulated waiting time (ts_wait): {ts_wait}\n")
+
+            # 记录上一次测量值
+            f.write(f"Last measure (self.last_measure): {self.last_measure}\n")
+
+            # 记录计算的奖励值
+            f.write(f"Computed reward: {reward}\n")
+
+            # 记录分隔符以便于调试
+            f.write("-" * 40 + "\n")
+
+        # 返回奖励值
         return reward
+
 
     def _observation_fn_default(self):
         phase_id = [1 if self.green_phase == i else 0 for i in range(self.num_green_phases)]  # one-hot encoding
-        min_green = [0 if self.time_since_last_phase_change < self.min_green + self.yellow_time else 1]
+        min_green = [0 if self.time_since_last_phase_change < self.min_green + self.yellow_time_1 + self.yellow_time_2 else 1]
         density = self.get_lanes_density()
         queue = self.get_lanes_queue()
         observation = np.array(phase_id + min_green + density + queue, dtype=np.float32)

@@ -1,0 +1,18 @@
+experiments/train_class2.py
+--num_of_episodes
+8
+--net_path
+sumo_rl/nets/2way-single-intersection/single-intersection-4.net.xml
+--total_timesteps
+8000
+--proportion_of_saturations
+0.75,0.75,0.75,0.75
+--note
+4-stage with dqn
+--training_fraction
+1
+--tripinfo
+--batch_size
+256
+--replay_buffer_size
+200000
